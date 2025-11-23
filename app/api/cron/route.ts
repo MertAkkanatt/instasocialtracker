@@ -1,105 +1,152 @@
-﻿import { NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { db } from "@/lib/firebaseAdmin";
-import axios from "axios";
+import Parser from "rss-parser";
+import { HfInference } from "@huggingface/inference";
+// Use require for node-telegram-bot-api to avoid type errors during build if types are missing
 const TelegramBot = require("node-telegram-bot-api");
 
-const token = process.env.TELEGRAM_BOT_TOKEN;
-const bot = new TelegramBot(token || "", { polling: false });
-const INSTAGRAM_SESSION_ID = process.env.INSTAGRAM_SESSION_ID;
+// --- CONFIG ---
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const HUGGINGFACE_TOKEN = process.env.HUGGINGFACE_API_KEY; 
 
-async function getFollowingList(username: string): Promise<string[]> {
-  if (!INSTAGRAM_SESSION_ID) throw new Error("Instagram Session ID missing");
+// Initialize Services
+const bot = new TelegramBot(TELEGRAM_TOKEN || "", { polling: false });
+const parser = new Parser();
+const hf = new HfInference(HUGGINGFACE_TOKEN); 
 
+// RSS Sources
+const RSS_FEEDS = [
+  "https://www.bloomberght.com/rss",
+  "https://tr.investing.com/rss/news.rss",
+  "https://www.donanimhaber.com/rss/tum/",
+];
+
+// --- TYPES ---
+interface NewsItem {
+  title: string;
+  link: string;
+  pubDate: string;
+  source: string;
+}
+
+interface AnalysisResult {
+  label: string; 
+  score: number;
+}
+
+// --- HELPERS ---
+async function fetchLatestNews(): Promise<NewsItem[]> {
+  let allNews: NewsItem[] = [];
+  
+  for (const feedUrl of RSS_FEEDS) {
+    try {
+      const feed = await parser.parseURL(feedUrl);
+      const items = feed.items.slice(0, 10).map((item: any) => ({
+        title: item.title || "",
+        link: item.link || "",
+        pubDate: item.pubDate || "",
+        source: feed.title || "Unknown Source"
+      }));
+      allNews = [...allNews, ...items];
+    } catch (err) {
+      console.error(`RSS Error (${feedUrl}):`, err);
+    }
+  }
+  return allNews;
+}
+
+async function analyzeSentiment(text: string): Promise<AnalysisResult> {
   try {
-    const profileUrl = "https://www.instagram.com/api/v1/users/web_profile_info/?username=" + username;
-    const headers = {
-        "Cookie": "sessionid=" + INSTAGRAM_SESSION_ID,
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
-        "X-IG-App-ID": "936619743392459",
-        "X-ASBD-ID": "198387",
-        "X-IG-WWW-Claim": "0",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": "https://www.instagram.com/" + username + "/",
-        "Accept-Language": "en-US,en;q=0.9"
-    };
-
-    const profileRes = await axios.get(profileUrl, { headers });
-    const userId = profileRes.data.data?.user?.id;
-    
-    if (!userId) throw new Error("User ID not found");
-
-    const followingUrl = "https://www.instagram.com/graphql/query/?query_hash=d04b0a864b4b54837c0d870b0e77e076&variables=" + encodeURIComponent(JSON.stringify({
-      id: userId,
-      include_reel: true,
-      fetch_mutual: false,
-      first: 50
-    }));
-    
-    const res = await axios.get(followingUrl, { 
-        headers: { ...headers, "Referer": "https://www.instagram.com/" + username + "/following/" } 
+    const result = await hf.textClassification({
+      model: "savasy/bert-base-turkish-sentiment-cased",
+      inputs: text,
     });
 
-    const edges = res.data.data.user.edge_follow.edges;
-    return edges.map((edge: any) => edge.node.username);
-
-  } catch (error: any) {
-    console.error("Error fetching instagram for " + username, error.response?.data || error.message);
-    throw error;
+    if (result && result.length > 0) {
+      return {
+        label: result[0].label, 
+        score: result[0].score
+      };
+    }
+    return { label: "neutral", score: 0.5 };
+  } catch (error) {
+    console.error("AI Analysis Failed:", error);
+    return { label: "neutral", score: 0.5 }; 
   }
 }
 
 export async function GET() {
   try {
+    // 1. Get all news
+    const news = await fetchLatestNews();
+    if (news.length === 0) {
+      return NextResponse.json({ status: "No news fetched" });
+    }
+
+    // 2. Get Users
     const usersSnap = await db.collection("users").get();
+
+    // 3. Process Each User
     const results = [];
 
     for (const userDoc of usersSnap.docs) {
       const userData = userDoc.data();
-      const { trackedAccount, telegramChatId, lastFollowingSnapshot } = userData;
+      const { keywords, telegramChatId, lastNotifiedNews } = userData;
 
-      if (!trackedAccount || !telegramChatId) continue;
+      if (!keywords || !telegramChatId || keywords.length === 0) continue;
 
-      try {
-        const currentFollowing = await getFollowingList(trackedAccount);
+      const notifiedLinks: string[] = lastNotifiedNews || [];
+      let newNotifiedLinks = [...notifiedLinks];
+      let messagesToSend: string[] = [];
 
-        if (currentFollowing.length === 0) {
-           results.push({ userId: userDoc.id, status: "Empty list fetched" });
-           continue;
-        }
+      // Filter news
+      const relevantNews = news.filter(item => {
+        const lowerTitle = item.title.toLowerCase();
+        return keywords.some((k: string) => lowerTitle.includes(k.toLowerCase()));
+      });
 
-        const previousFollowing: string[] = lastFollowingSnapshot || [];
+      for (const item of relevantNews) {
+        if (newNotifiedLinks.includes(item.link)) continue;
+
+        // Analyze
+        const sentiment = await analyzeSentiment(item.title);
         
-        if (previousFollowing.length === 0) {
-          await userDoc.ref.update({ lastFollowingSnapshot: currentFollowing });
-          await bot.sendMessage(telegramChatId, "ğŸ” " + trackedAccount + " takibi baÅŸladÄ±! Åu an " + currentFollowing.length + " kiÅŸiyi takip ediyor.");
-          results.push({ userId: userDoc.id, status: "Initialized" });
-          continue;
+        let emoji = "😐";
+        let sentimentText = "Nötr";
+        
+        // Thresholds for Turkish model
+        if (sentiment.label === "positive" && sentiment.score > 0.6) {
+          emoji = "🚀";
+          sentimentText = "OLUMLU";
+        } else if (sentiment.label === "negative" && sentiment.score > 0.6) {
+          emoji = "🔻";
+          sentimentText = "OLUMSUZ";
         }
 
-        const newFollows = currentFollowing.filter((u: string) => !previousFollowing.includes(u));
-        const unfollows = previousFollowing.filter((u: string) => !currentFollowing.includes(u));
+        const msg = `${emoji} **${sentimentText}** Gelişme (%${Math.round(sentiment.score * 100)})\n\n📰 **${item.title}**\n\n🔗 [Haberi Oku](${item.link})`;
+        messagesToSend.push(msg);
+        newNotifiedLinks.push(item.link);
+      }
 
-        if (newFollows.length > 0) {
-          await bot.sendMessage(telegramChatId, "ğŸš¨ " + trackedAccount + " ÅŸu kiÅŸileri takip etmeye baÅŸladÄ±:\n\n" + newFollows.map((u: string) => "â€¢ " + u).join("\n"));
-        }
-
-        if (unfollows.length > 0) {
-          await bot.sendMessage(telegramChatId, "ğŸ‘€ " + trackedAccount + " ÅŸu kiÅŸileri takipten Ã§Ä±ktÄ±:\n\n" + unfollows.map((u: string) => "â€¢ " + u).join("\n"));
-        }
-
-        if (newFollows.length > 0 || unfollows.length > 0) {
-             await userDoc.ref.update({ lastFollowingSnapshot: currentFollowing });
+      if (messagesToSend.length > 0) {
+        // Send max 3 messages
+        for (const msg of messagesToSend.slice(0, 3)) {
+            await bot.sendMessage(telegramChatId, msg, { parse_mode: "Markdown" });
         }
         
-        results.push({ userId: userDoc.id, new: newFollows.length, left: unfollows.length });
-
-      } catch (err: any) {
-        results.push({ userId: userDoc.id, status: "Failed", error: err.message });
+        if (newNotifiedLinks.length > 50) {
+            newNotifiedLinks = newNotifiedLinks.slice(-50);
+        }
+        await userDoc.ref.update({ lastNotifiedNews: newNotifiedLinks });
+        
+        results.push({ userId: userDoc.id, sent: messagesToSend.length });
       }
     }
 
     return NextResponse.json({ success: true, results });
-  } catch (error) {
-    return NextResponse.json({ error: "Cron failed" }, { status: 500 });
+  } catch (error: any) {
+    console.error("Cron Job Error:", error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+

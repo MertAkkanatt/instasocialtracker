@@ -75,7 +75,10 @@ export default function Home() {
   // Generate Telegram Deep Link
   // You need to set NEXT_PUBLIC_TELEGRAM_BOT_NAME in env
   const telegramBotName = process.env.NEXT_PUBLIC_TELEGRAM_BOT_NAME || "MyTrackerBot";
-  const telegramLink = user ? `https://t.me/${telegramBotName}?start=${user.uid}` : "#";
+  // Ensure we have a user UID before generating the link
+  const telegramLink = user && user.uid 
+    ? `https://t.me/${telegramBotName}?start=${user.uid}` 
+    : "https://t.me/" + telegramBotName;
 
   if (loading) return <div className="p-8">Yükleniyor...</div>;
 

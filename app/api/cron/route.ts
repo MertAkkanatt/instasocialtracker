@@ -67,7 +67,7 @@ export async function GET() {
            continue;
         }
 
-        const previousFollowing = lastFollowingSnapshot || [];
+        const previousFollowing: string[] = lastFollowingSnapshot || [];
         
         if (previousFollowing.length === 0) {
           await userDoc.ref.update({ lastFollowingSnapshot: currentFollowing });
@@ -76,15 +76,15 @@ export async function GET() {
           continue;
         }
 
-        const newFollows = currentFollowing.filter(u => !previousFollowing.includes(u));
-        const unfollows = previousFollowing.filter(u => !currentFollowing.includes(u));
+        const newFollows = currentFollowing.filter((u: string) => !previousFollowing.includes(u));
+        const unfollows = previousFollowing.filter((u: string) => !currentFollowing.includes(u));
 
         if (newFollows.length > 0) {
-          await bot.sendMessage(telegramChatId, "ğŸš¨ " + trackedAccount + " ÅŸu kiÅŸileri takip etmeye baÅŸladÄ±:\n\n" + newFollows.map(u => "â€¢ " + u).join("\n"));
+          await bot.sendMessage(telegramChatId, "ğŸš¨ " + trackedAccount + " ÅŸu kiÅŸileri takip etmeye baÅŸladÄ±:\n\n" + newFollows.map((u: string) => "â€¢ " + u).join("\n"));
         }
 
         if (unfollows.length > 0) {
-          await bot.sendMessage(telegramChatId, "ğŸ‘€ " + trackedAccount + " ÅŸu kiÅŸileri takipten Ã§Ä±ktÄ±:\n\n" + unfollows.map(u => "â€¢ " + u).join("\n"));
+          await bot.sendMessage(telegramChatId, "ğŸ‘€ " + trackedAccount + " ÅŸu kiÅŸileri takipten Ã§Ä±ktÄ±:\n\n" + unfollows.map((u: string) => "â€¢ " + u).join("\n"));
         }
 
         if (newFollows.length > 0 || unfollows.length > 0) {
